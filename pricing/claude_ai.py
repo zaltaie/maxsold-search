@@ -1,136 +1,152 @@
-import json
-import logging
+"""
+Rule-based pricing engine for camera listings.
+Compares eBay sold comps against the current bid to estimate value,
+score condition from description keywords, and flag deals.
 
-import anthropic
+No API keys required — pure math and keyword analysis.
+"""
+
+import logging
+import re
 
 from db.database import get_session
 from db.models import PriceResearch
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are a camera pricing expert helping a Vancouver reseller evaluate auction listings.
-You will be given a Maxsold listing and eBay sold comps data.
-Respond ONLY with a valid JSON object. No preamble, no explanation."""
+# Keywords that indicate condition level (checked against description, case-insensitive)
+CONDITION_KEYWORDS = {
+    "Excellent": [
+        "mint", "like new", "excellent", "pristine", "perfect",
+        "barely used", "immaculate", "flawless",
+    ],
+    "Good": [
+        "good condition", "works well", "working", "functions",
+        "tested", "clean", "nice", "well maintained", "light wear",
+    ],
+    "Fair": [
+        "fair", "some wear", "scratches", "scuffs", "signs of use",
+        "cosmetic", "used", "wear", "aged", "patina",
+    ],
+    "Parts Only": [
+        "parts only", "parts or repair", "not working", "broken",
+        "as-is", "as is", "for parts", "untested", "repair",
+        "damaged", "crack", "fungus", "haze", "stuck", "jammed",
+    ],
+}
+
+# FB Marketplace typically sells at ~80-90% of eBay prices (local, no shipping)
+FB_MARKETPLACE_FACTOR = 0.85
 
 
-def _build_user_prompt(listing: dict, ebay_comps: dict, config: dict) -> str:
-    """Construct the user prompt with listing and comp data."""
-    margin_target = config.get("business", {}).get("margin_target", 0.50)
-    margin_pct = int(margin_target * 100)
-
-    return f"""Listing title: {listing.get('title', 'Unknown')}
-Listing description: {listing.get('description', 'No description')}
-Current bid: ${listing.get('current_bid', 0):.2f} CAD
-Auction ends: {listing.get('auction_end_time', 'Unknown')}
-
-eBay sold comps (last 90 days):
-- Average sold price: ${ebay_comps.get('average_sold', 0):.2f} CAD
-- Range: ${ebay_comps.get('min_sold', 0):.2f} to ${ebay_comps.get('max_sold', 0):.2f} CAD
-- Sample size: {ebay_comps.get('sample_count', 0)} listings
-
-Margin target: {margin_pct}% (buy at {margin_pct}% of estimated resale value)
-
-Return this exact JSON structure:
-{{
-  "estimated_value": <number in CAD>,
-  "max_bid_price": <number in CAD, {margin_pct}% of estimated_value>,
-  "fb_marketplace_ceiling": <number in CAD, estimated max FB Marketplace Vancouver sell price>,
-  "condition_score": "<Excellent | Good | Fair | Parts Only>",
-  "condition_notes": "<brief notes on condition indicators found in listing text>",
-  "deal_flag": <true if current bid is below max_bid_price, false otherwise>,
-  "summary": "<one sentence plain English summary for the seller>"
-}}"""
-
-
-def research_listing(listing: dict, ebay_comps: dict, config: dict) -> dict:
+def _score_condition(description: str) -> tuple[str, str]:
     """
-    Use Claude API to analyze a listing with eBay comp data.
+    Analyze listing description text to estimate condition.
+    Returns (condition_score, condition_notes).
+    """
+    desc_lower = description.lower()
+
+    # Check from best to worst — more specific phrases like "barely used" match before generic "used"
+    for condition in ["Excellent", "Good", "Parts Only", "Fair"]:
+        matched_keywords = []
+        for kw in CONDITION_KEYWORDS[condition]:
+            # Use word boundary matching to avoid "untested" matching "tested"
+            pattern = r'(?<!\w)' + re.escape(kw) + r'(?!\w)'
+            if re.search(pattern, desc_lower):
+                matched_keywords.append(kw)
+        if matched_keywords:
+            notes = f"Matched: {', '.join(matched_keywords[:3])}"
+            return condition, notes
+
+    # No matches — default to Fair (conservative)
+    return "Fair", "No condition indicators found in description"
+
+
+def research_listing(listing: dict, ebay_comps: dict, config: dict = None) -> dict:
+    """
+    Rule-based pricing analysis for a camera listing.
+
+    Uses eBay sold comps and description keyword analysis to produce
+    the same output structure as the old AI-based approach.
 
     Args:
         listing: dict with title, description, current_bid, auction_end_time
         ebay_comps: dict from get_ebay_sold_comps()
-        config: full config dict
+        config: full config dict (optional)
 
     Returns:
-        dict with pricing analysis fields, or empty dict on failure.
+        dict with estimated_value, max_bid_price, fb_marketplace_ceiling,
+        condition_score, condition_notes, deal_flag, summary.
     """
-    api_key = config.get("claude", {}).get("api_key", "")
-    model = config.get("claude", {}).get("model", "claude-sonnet-4-20250514")
+    if config is None:
+        config = {}
 
-    if not api_key or api_key == "YOUR_ANTHROPIC_API_KEY":
-        logger.warning("Claude API key not configured, skipping AI research")
-        return _fallback_research(listing, ebay_comps, config)
-
-    client = anthropic.Anthropic(api_key=api_key)
-    user_prompt = _build_user_prompt(listing, ebay_comps, config)
-
-    try:
-        message = client.messages.create(
-            model=model,
-            max_tokens=1024,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-
-        # Extract text content from response
-        response_text = ""
-        for block in message.content:
-            if hasattr(block, "text"):
-                response_text += block.text
-
-        # Parse JSON response
-        result = json.loads(response_text.strip())
-
-        # Validate expected fields
-        expected_fields = [
-            "estimated_value", "max_bid_price", "fb_marketplace_ceiling",
-            "condition_score", "condition_notes", "deal_flag", "summary"
-        ]
-        for field in expected_fields:
-            if field not in result:
-                logger.warning(f"Missing field '{field}' in Claude response")
-
-        logger.info(
-            f"AI research for '{listing.get('title', '?')}': "
-            f"est=${result.get('estimated_value', 0):.2f}, "
-            f"deal={result.get('deal_flag', False)}"
-        )
-        return result
-
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse Claude JSON response: {e}")
-        logger.debug(f"Raw response: {response_text[:500]}")
-        return _fallback_research(listing, ebay_comps, config)
-
-    except anthropic.APIError as e:
-        logger.error(f"Claude API error: {e}")
-        return _fallback_research(listing, ebay_comps, config)
-
-    except Exception as e:
-        logger.error(f"Unexpected error in AI research: {e}")
-        return _fallback_research(listing, ebay_comps, config)
-
-
-def _fallback_research(listing: dict, ebay_comps: dict, config: dict) -> dict:
-    """Simple rule-based fallback when Claude API is unavailable."""
-    avg_sold = ebay_comps.get("average_sold", 0)
     margin_target = config.get("business", {}).get("margin_target", 0.50)
     current_bid = listing.get("current_bid", 0)
+    title = listing.get("title", "Unknown camera")
+    description = listing.get("description", "")
 
-    estimated_value = avg_sold if avg_sold > 0 else 0
+    # Estimate value from eBay comps
+    avg_sold = ebay_comps.get("average_sold", 0)
+    min_sold = ebay_comps.get("min_sold", 0)
+    max_sold = ebay_comps.get("max_sold", 0)
+    sample_count = ebay_comps.get("sample_count", 0)
+
+    # Score condition from description
+    condition_score, condition_notes = _score_condition(description)
+
+    # Adjust estimated value based on condition
+    condition_multiplier = {
+        "Excellent": 1.1,  # Can sell above average
+        "Good": 1.0,       # Average price
+        "Fair": 0.8,       # Below average
+        "Parts Only": 0.4, # Significant discount
+    }.get(condition_score, 0.8)
+
+    if avg_sold > 0:
+        estimated_value = round(avg_sold * condition_multiplier, 2)
+    else:
+        # No comps — can't estimate
+        estimated_value = 0
+
     max_bid_price = round(estimated_value * margin_target, 2)
+    fb_marketplace_ceiling = round(estimated_value * FB_MARKETPLACE_FACTOR, 2)
     deal_flag = current_bid < max_bid_price if max_bid_price > 0 else False
 
-    return {
+    # Build summary
+    if estimated_value > 0 and deal_flag:
+        savings = max_bid_price - current_bid
+        summary = (
+            f"{title} — estimated resale ${estimated_value:.0f} CAD, "
+            f"current bid ${current_bid:.0f} is ${savings:.0f} under your max bid target."
+        )
+    elif estimated_value > 0:
+        summary = (
+            f"{title} — estimated resale ${estimated_value:.0f} CAD "
+            f"({sample_count} eBay comps), condition: {condition_score}. "
+            f"Current bid ${current_bid:.0f} exceeds the ${max_bid_price:.0f} target."
+        )
+    else:
+        summary = (
+            f"{title} — no eBay sold data found. "
+            f"Manual research recommended before bidding."
+        )
+
+    result = {
         "estimated_value": estimated_value,
         "max_bid_price": max_bid_price,
-        "fb_marketplace_ceiling": round(estimated_value * 0.85, 2),
-        "condition_score": "Fair",
-        "condition_notes": "Condition could not be assessed (AI unavailable)",
+        "fb_marketplace_ceiling": fb_marketplace_ceiling,
+        "condition_score": condition_score,
+        "condition_notes": condition_notes,
         "deal_flag": deal_flag,
-        "summary": f"Estimated value ${estimated_value:.2f} CAD based on eBay comps. "
-                   f"{'Deal detected!' if deal_flag else 'Current bid exceeds target.'}",
+        "summary": summary,
     }
+
+    logger.info(
+        f"Priced '{title}': est=${estimated_value:.2f}, "
+        f"condition={condition_score}, deal={deal_flag}"
+    )
+    return result
 
 
 def save_research(listing_id: int, research: dict, ebay_comps: dict) -> PriceResearch:

@@ -1,7 +1,16 @@
+# =============================================================================
+# Camera Finder — Configuration
+# =============================================================================
+# This app works out of the box with zero configuration.
+# Just run: python main.py --scan
+#
+# Email notifications are optional — configure below if you want them.
+# =============================================================================
+
 # Maxsold settings
 maxsold:
   region_url: "https://maxsold.com/canada/british-columbia/vancouver"
-  scrape_interval_minutes: 30
+  scan_time: "08:00"         # Daily auto-scan time (24h format). Set to "" to disable.
 
 # Camera keywords to match (title + description search)
 keywords:
@@ -94,22 +103,13 @@ business:
   margin_target: 0.50        # Buy at 50% of estimated resale value
   currency: CAD
 
-# eBay API
-ebay:
-  app_id: "YOUR_EBAY_APP_ID"
-  app_secret: "YOUR_EBAY_APP_SECRET"
-  sold_days_lookback: 90     # Look at last 90 days of sold listings
-
-# Claude API
-claude:
-  api_key: "YOUR_ANTHROPIC_API_KEY"
-  model: "claude-sonnet-4-20250514"
-
-# Email (Gmail SMTP)
+# =============================================================================
+# OPTIONAL: Email notifications (Gmail SMTP)
+# Leave as-is to skip email. HTML reports are always generated locally.
+# =============================================================================
 email:
   smtp_host: "smtp.gmail.com"
   smtp_port: 587
-  sender_address: "YOUR_GMAIL@gmail.com"
-  app_password: "YOUR_GMAIL_APP_PASSWORD"   # Generate in Google Account > Security > App Passwords
-  recipient_address: "YOUR_GMAIL@gmail.com"
-  digest_hour: 8             # Send daily digest at 8am
+  sender_address: ""         # Your Gmail address
+  app_password: ""           # Google Account > Security > App Passwords
+  recipient_address: ""      # Where to send alerts (defaults to sender)

@@ -1,7 +1,6 @@
 playwright
 apscheduler
 sqlalchemy
-anthropic
 requests
 pyyaml
 rich

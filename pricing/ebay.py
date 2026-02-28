@@ -1,7 +1,9 @@
-import base64
 import logging
+import re
 import time
+import random
 from typing import Optional
+from urllib.parse import quote_plus
 
 import requests
 
@@ -10,86 +12,103 @@ logger = logging.getLogger(__name__)
 # USD to CAD conversion rate (approximate)
 USD_TO_CAD = 1.35
 
-# Module-level token cache
-_token_cache = {
-    "access_token": None,
-    "expires_at": 0,
-}
+EBAY_SEARCH_URL = "https://www.ebay.com/sch/i.html"
 
-EBAY_AUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
-EBAY_BROWSE_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
+# Common user agents to rotate through
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+]
 
 
-def _get_token(config: dict) -> str:
-    """Get eBay OAuth2 access token using client credentials flow. Caches and auto-refreshes."""
-    global _token_cache
-
-    # Return cached token if still valid (with 60s buffer)
-    if _token_cache["access_token"] and time.time() < _token_cache["expires_at"] - 60:
-        return _token_cache["access_token"]
-
-    app_id = config["ebay"]["app_id"]
-    app_secret = config["ebay"].get("app_secret", "")
-
-    # Base64 encode client credentials
-    credentials = base64.b64encode(f"{app_id}:{app_secret}".encode()).decode()
-
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Authorization": f"Basic {credentials}",
+def _get_headers() -> dict:
+    return {
+        "User-Agent": random.choice(_USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
     }
 
-    data = {
-        "grant_type": "client_credentials",
-        "scope": "https://api.ebay.com/oauth/api_scope",
-    }
 
-    resp = requests.post(EBAY_AUTH_URL, headers=headers, data=data, timeout=15)
-    resp.raise_for_status()
-
-    token_data = resp.json()
-    _token_cache["access_token"] = token_data["access_token"]
-    _token_cache["expires_at"] = time.time() + token_data.get("expires_in", 7200)
-
-    logger.info("eBay OAuth2 token obtained/refreshed")
-    return _token_cache["access_token"]
-
-
-def _search_sold_items(query: str, token: str, days_back: int = 90) -> list:
-    """Search eBay for sold/completed items matching the query."""
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
-        "Content-Type": "application/json",
-    }
-
-    params = {
-        "q": query,
-        "filter": "conditionIds:{1000|1500|2000|2500|3000},buyingOptions:{FIXED_PRICE|AUCTION}",
-        "sort": "-price",
-        "limit": "50",
-    }
-
-    resp = requests.get(EBAY_BROWSE_URL, headers=headers, params=params, timeout=15)
-
-    if resp.status_code == 404:
-        return []
-    resp.raise_for_status()
-
-    data = resp.json()
-    return data.get("itemSummaries", [])
-
-
-def _extract_price(item: dict) -> Optional[float]:
-    """Extract the price from an eBay item summary."""
-    price_info = item.get("price", {})
-    value = price_info.get("value")
-    if value:
+def _parse_price(price_text: str) -> Optional[float]:
+    """Extract a numeric price from eBay price text like '$145.00' or 'C $200.00'."""
+    match = re.search(r"[\$]?\s*([\d,]+\.?\d*)", price_text.replace(",", ""))
+    if match:
         try:
-            return float(value)
-        except (ValueError, TypeError):
+            return float(match.group(1))
+        except ValueError:
             return None
     return None
+
+
+def _scrape_ebay_sold(query: str) -> list:
+    """
+    Scrape eBay completed/sold listings for a search query.
+    Returns a list of dicts with title, price_usd, and url.
+    No API key needed — uses public search pages.
+    """
+    params = {
+        "_nkw": query,
+        "LH_Complete": "1",  # Completed listings
+        "LH_Sold": "1",      # Sold only
+        "_sop": "13",        # Sort by end date: recent first
+        "_ipg": "60",        # Results per page
+    }
+
+    try:
+        resp = requests.get(EBAY_SEARCH_URL, params=params, headers=_get_headers(), timeout=20)
+        resp.raise_for_status()
+    except Exception as e:
+        logger.warning(f"eBay scrape failed for '{query}': {e}")
+        return []
+
+    html = resp.text
+    items = []
+
+    # Parse sold items from search results HTML
+    # eBay uses s-item class for each result
+    item_blocks = re.split(r'class="s-item__wrapper', html)
+
+    for block in item_blocks[1:]:  # Skip first split (before any item)
+        # Extract title
+        title_match = re.search(
+            r'class="s-item__title"[^>]*>(?:<span[^>]*>)?(.*?)(?:</span>)?</(?:div|h3|span)',
+            block, re.DOTALL
+        )
+        if not title_match:
+            continue
+        title = re.sub(r"<[^>]+>", "", title_match.group(1)).strip()
+        if not title or title.lower() == "shop on ebay":
+            continue
+
+        # Extract sold price
+        price_match = re.search(
+            r'class="s-item__price"[^>]*>(.*?)</span',
+            block, re.DOTALL
+        )
+        if not price_match:
+            continue
+        price_text = re.sub(r"<[^>]+>", "", price_match.group(1)).strip()
+
+        # Skip price ranges like "$50.00 to $100.00"
+        if " to " in price_text.lower():
+            continue
+
+        price_usd = _parse_price(price_text)
+        if price_usd is None or price_usd <= 0:
+            continue
+
+        # Extract URL
+        url_match = re.search(r'href="(https://www\.ebay\.com/itm/[^"]+)"', block)
+        url = url_match.group(1) if url_match else ""
+
+        items.append({
+            "title": title,
+            "price_usd": price_usd,
+            "url": url,
+        })
+
+    return items
 
 
 def _generate_fallback_queries(camera_model: str) -> list:
@@ -104,9 +123,10 @@ def _generate_fallback_queries(camera_model: str) -> list:
 
     # Add generic category fallbacks
     model_lower = camera_model.lower()
+    first_word = camera_model.split()[0] if camera_model.split() else ""
     if any(term in model_lower for term in ["canon", "nikon", "pentax", "minolta", "olympus"]):
         if any(term in model_lower for term in ["ae-1", "a-1", "f-1", "fm", "fe", "k1000", "x-700", "om-1"]):
-            queries.append(f"{words[0]} film camera" if words else "film camera")
+            queries.append(f"{first_word} film camera")
     if any(term in model_lower for term in ["bolex", "super 8", "8mm"]):
         queries.append("vintage movie camera")
     if any(term in model_lower for term in ["hasselblad", "rolleiflex", "mamiya"]):
@@ -115,9 +135,10 @@ def _generate_fallback_queries(camera_model: str) -> list:
     return queries
 
 
-def get_ebay_sold_comps(camera_model: str, config: dict) -> dict:
+def get_ebay_sold_comps(camera_model: str, config: dict = None) -> dict:
     """
-    Get sold comparable listings from eBay for a camera model.
+    Get sold comparable listings from eBay by scraping public search pages.
+    No API key or login required.
 
     Returns a dict with average, min, max sold prices (in CAD),
     sample count, and raw listing data.
@@ -131,52 +152,36 @@ def get_ebay_sold_comps(camera_model: str, config: dict) -> dict:
         "raw_listings": [],
     }
 
-    try:
-        token = _get_token(config)
-    except Exception as e:
-        logger.error(f"eBay auth failed: {e}")
-        return result
-
     queries = _generate_fallback_queries(camera_model)
     items = []
 
     for query in queries:
-        try:
-            items = _search_sold_items(query, token, config["ebay"].get("sold_days_lookback", 90))
-            if items:
-                logger.info(f"eBay: Found {len(items)} comps for query '{query}'")
-                break
-            logger.info(f"eBay: No results for '{query}', trying broader search...")
-        except Exception as e:
-            logger.warning(f"eBay search failed for '{query}': {e}")
-            continue
+        # Polite delay between requests
+        time.sleep(random.uniform(1.5, 3.0))
+
+        items = _scrape_ebay_sold(query)
+        if items:
+            logger.info(f"eBay: Found {len(items)} sold comps for '{query}'")
+            break
+        logger.info(f"eBay: No results for '{query}', trying broader search...")
 
     if not items:
         logger.warning(f"eBay: No comparable sales found for '{camera_model}'")
         return result
 
-    # Extract prices and convert to CAD
+    # Convert to CAD and build result
     prices_cad = []
     raw_listings = []
 
     for item in items:
-        price_usd = _extract_price(item)
-        if price_usd is None or price_usd <= 0:
-            continue
-
-        price_cad = price_usd * USD_TO_CAD
+        price_cad = item["price_usd"] * USD_TO_CAD
         prices_cad.append(price_cad)
-
         raw_listings.append({
-            "title": item.get("title", ""),
-            "price_usd": price_usd,
+            "title": item["title"],
+            "price_usd": item["price_usd"],
             "price_cad": round(price_cad, 2),
-            "condition": item.get("condition", ""),
-            "item_web_url": item.get("itemWebUrl", ""),
+            "url": item.get("url", ""),
         })
-
-    if not prices_cad:
-        return result
 
     result["average_sold"] = round(sum(prices_cad) / len(prices_cad), 2)
     result["min_sold"] = round(min(prices_cad), 2)
