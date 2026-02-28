@@ -1,0 +1,115 @@
+# Maxsold settings
+maxsold:
+  region_url: "https://maxsold.com/canada/british-columbia/vancouver"
+  scrape_interval_minutes: 30
+
+# Camera keywords to match (title + description search)
+keywords:
+  digital:
+    - digital camera
+    - digicam
+    - point and shoot
+    - compact camera
+    - Sony Cybershot
+    - Canon PowerShot
+    - Nikon Coolpix
+    - Olympus Stylus
+    - Panasonic Lumix
+    - Fujifilm FinePix
+    - Casio Exilim
+    - DSLR
+    - mirrorless
+    - Canon EOS
+    - Nikon D
+    - Sony Alpha
+    - Fujifilm X
+    - micro four thirds
+    - M43
+  slr_film:
+    - SLR
+    - film camera
+    - 35mm
+    - 35 mm
+    - analog camera
+    - Canon AE-1
+    - Canon F-1
+    - Canon A-1
+    - Nikon FM
+    - Nikon FE
+    - Nikon FA
+    - Nikon F2
+    - Nikon F3
+    - Pentax K1000
+    - Pentax Spotmatic
+    - Minolta X-700
+    - Minolta SR-T
+    - Olympus OM-1
+    - Olympus OM-10
+    - Leica
+    - rangefinder
+    - Yashica
+    - Contax
+    - Konica
+    - Mamiya
+    - medium format
+    - Hasselblad
+    - Rolleiflex
+    - TLR
+  cine_8mm:
+    - 8mm camera
+    - Super 8
+    - Super8
+    - cine camera
+    - Bolex
+    - Kodak Brownie
+    - Bell and Howell
+    - movie camera
+    - reel camera
+    - 16mm
+    - wind-up camera
+  accessories:
+    - camera lens
+    - vintage lens
+    - camera lot
+    - camera collection
+    - darkroom
+    - film developing
+  estate_fuzzy:
+    - vintage electronics
+    - lot of cameras
+    - photography equipment
+    - photography lot
+    - camera equipment
+
+# Watchlist — models you specifically want alerts for
+watchlist:
+  - Canon AE-1
+  - Bolex
+  - Leica
+  - Hasselblad
+  - Rolleiflex
+
+# Business settings
+business:
+  margin_target: 0.50        # Buy at 50% of estimated resale value
+  currency: CAD
+
+# eBay API
+ebay:
+  app_id: "YOUR_EBAY_APP_ID"
+  app_secret: "YOUR_EBAY_APP_SECRET"
+  sold_days_lookback: 90     # Look at last 90 days of sold listings
+
+# Claude API
+claude:
+  api_key: "YOUR_ANTHROPIC_API_KEY"
+  model: "claude-sonnet-4-20250514"
+
+# Email (Gmail SMTP)
+email:
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  sender_address: "YOUR_GMAIL@gmail.com"
+  app_password: "YOUR_GMAIL_APP_PASSWORD"   # Generate in Google Account > Security > App Passwords
+  recipient_address: "YOUR_GMAIL@gmail.com"
+  digest_hour: 8             # Send daily digest at 8am
