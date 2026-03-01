@@ -138,7 +138,7 @@ def send_instant_alert(listing, research: dict, config: dict) -> bool:
     </table>
 
     <div style="background:#e7f5ff;border-left:4px solid #339af0;padding:12px 16px;margin:16px 0;border-radius:0 6px 6px 0;">
-      <div style="font-size:12px;color:#339af0;text-transform:uppercase;margin-bottom:4px;">AI Summary</div>
+      <div style="font-size:12px;color:#339af0;text-transform:uppercase;margin-bottom:4px;">Analysis</div>
       <div style="color:#212529;font-size:14px;">{summary}</div>
     </div>
 
