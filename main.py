@@ -32,8 +32,39 @@ logging.basicConfig(
 logger = logging.getLogger("camera_finder")
 
 
+def load_keywords_file() -> dict:
+    """
+    Load extra keywords from keywords.txt (same directory as main.py).
+
+    Format: one keyword per line, # comments, blank lines ignored.
+    Optional [category] section headers route keywords into named categories.
+    Keywords before any header go into "custom".
+
+    Returns a dict of {category: [keywords]}, or {} if the file doesn't exist.
+    """
+    keywords_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "keywords.txt")
+    if not os.path.exists(keywords_path):
+        return {}
+
+    result: dict = {}
+    current_category = "custom"
+
+    with open(keywords_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                current_category = line[1:-1].strip().lower()
+                continue
+            result.setdefault(current_category, [])
+            result[current_category].append(line)
+
+    return result
+
+
 def load_config() -> dict:
-    """Load configuration from config.yaml."""
+    """Load configuration from config.yaml, then merge in keywords.txt."""
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
     if not os.path.exists(config_path):
         console.print(f"[red]Config file not found: {config_path}[/red]")
@@ -41,6 +72,21 @@ def load_config() -> dict:
 
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
+
+    # Merge keywords.txt into config["keywords"]
+    extra = load_keywords_file()
+    if extra:
+        total_added = 0
+        for category, kws in extra.items():
+            config["keywords"].setdefault(category, [])
+            existing_lower = {k.lower() for k in config["keywords"][category]}
+            for kw in kws:
+                if kw.lower() not in existing_lower:
+                    config["keywords"][category].append(kw)
+                    existing_lower.add(kw.lower())
+                    total_added += 1
+        if total_added:
+            console.print(f"  [dim]keywords.txt: {total_added} custom keyword{'s' if total_added != 1 else ''} loaded[/dim]")
 
     return config
 

@@ -1,0 +1,111 @@
+# =============================================================================
+# Camera Finder — Custom Keywords
+# =============================================================================
+#
+# Add any camera model, brand, or term you want to search for.
+# One keyword per line. Lines starting with # are ignored. Blank lines are fine.
+#
+# Use [category] headers to organise your keywords (optional).
+# Available categories:
+#   [digital]      — DSLRs, mirrorless, point-and-shoot
+#   [slr_film]     — 35mm SLR, rangefinder, medium format
+#   [cine_8mm]     — Super 8, 16mm, cine cameras
+#   [accessories]  — lenses, darkroom, film
+#   [estate_fuzzy] — broad estate sale terms
+#
+# Keywords without a [category] header go into a "custom" bucket.
+#
+# Examples:
+#   Canon T70
+#   Zorki
+#   Kiev
+#   Voigtlander
+#
+# Keywords here are MERGED with the ones in config.yaml —
+# you don't need to remove anything from config.yaml.
+# Duplicates are ignored automatically.
+# =============================================================================
+
+
+# --- Extra SLR / Film cameras --------------------------------------------------
+[slr_film]
+Canon T70
+Canon T50
+Canon T90
+Canon AL-1
+Canon EF
+Nikon FG
+Nikon EM
+Nikon F
+Nikon F4
+Nikon F5
+Pentax ME
+Pentax ME Super
+Pentax MX
+Pentax LX
+Minolta X-570
+Minolta X-700
+Minolta SRT
+Olympus OM-2
+Olympus OM-3
+Olympus OM-4
+Voigtlander
+Zorki
+Kiev
+FED
+Zenit
+Praktica
+Exakta
+Topcon
+Miranda
+Ricoh KR
+Cosina
+Revueflex
+
+
+# --- Extra digital cameras -----------------------------------------------------
+[digital]
+Sony Mavica
+Sony DSC
+Nikon Coolpix 990
+Nikon Coolpix 995
+Canon S90
+Canon G10
+Canon G12
+Ricoh GR
+Ricoh GR Digital
+Sigma DP
+Foveon
+
+
+# --- Extra cine / movie cameras ------------------------------------------------
+[cine_8mm]
+Kodak Brownie Movie
+Revere
+Keystone
+Elmo
+Bauer
+Leicina
+Nizo
+Sankyo
+Canon Scoopic
+
+
+# --- Extra accessories ---------------------------------------------------------
+[accessories]
+enlarger
+film scanner
+slide projector
+light meter
+Gossen
+Sekonic
+Weston meter
+dark room
+photo lab
+
+
+# --- Your personal watchlist additions (uncomment to activate) ----------------
+# [slr_film]
+# Nikon F3HP
+# Leica M6
+# Contax G2
