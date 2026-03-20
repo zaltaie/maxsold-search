@@ -10,7 +10,7 @@ import webbrowser
 from datetime import datetime, timedelta, timezone
 
 from db.database import get_session
-from db.models import Listing, PriceResearch
+from db.models import BidHistory, Listing, PriceResearch
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,46 @@ def _ensure_reports_dir():
     os.makedirs(REPORTS_DIR, exist_ok=True)
 
 
-def _listing_card_html(listing, research) -> str:
+def _bid_history_chart_html(bid_records: list) -> str:
+    """Generate a simple inline SVG sparkline for bid history."""
+    if not bid_records or len(bid_records) < 2:
+        return ""
+
+    amounts = [r.bid_amount for r in bid_records]
+    min_val = min(amounts)
+    max_val = max(amounts)
+    val_range = max_val - min_val if max_val > min_val else 1
+
+    width = 200
+    height = 40
+    padding = 2
+    chart_w = width - 2 * padding
+    chart_h = height - 2 * padding
+
+    n = len(amounts)
+    points = []
+    for i, val in enumerate(amounts):
+        x = padding + (i / (n - 1)) * chart_w
+        y = padding + chart_h - ((val - min_val) / val_range) * chart_h
+        points.append(f"{x:.1f},{y:.1f}")
+
+    polyline = " ".join(points)
+    first = amounts[0]
+    last = amounts[-1]
+    change_pct = ((last - first) / first * 100) if first > 0 else 0
+    color = "#dc3545" if change_pct > 0 else "#28a745"
+
+    return f"""
+    <div style="margin:8px 0;">
+      <div style="font-size:11px;color:#868e96;margin-bottom:2px;">Bid History ({n} updates)</div>
+      <svg width="{width}" height="{height}" style="background:#f8f9fa;border-radius:4px;">
+        <polyline points="{polyline}" fill="none" stroke="{color}" stroke-width="2" />
+      </svg>
+      <div style="font-size:11px;color:{color};">${first:.2f} → ${last:.2f} ({change_pct:+.0f}%)</div>
+    </div>"""
+
+
+def _listing_card_html(listing, research, bid_records=None) -> str:
     """Generate HTML for a single listing card."""
     condition = research.condition_score if research else "Unknown"
     condition_color = CONDITION_COLORS.get(condition, "#6c757d")
@@ -53,6 +92,9 @@ def _listing_card_html(listing, research) -> str:
     if listing.auction_end_time:
         end_str = listing.auction_end_time.strftime("%b %d, %I:%M %p") if isinstance(listing.auction_end_time, datetime) else str(listing.auction_end_time)
 
+    # Bid history chart
+    bid_chart = _bid_history_chart_html(bid_records) if bid_records else ""
+
     return f"""
     <div style="background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,0.1);position:relative;">
       {deal_html}
@@ -69,6 +111,7 @@ def _listing_card_html(listing, research) -> str:
           <tr><td>Max Bid Target</td><td style="text-align:right;">{max_bid}</td></tr>
           <tr><td>FB Marketplace</td><td style="text-align:right;">{fb_price}</td></tr>
         </table>
+        {bid_chart}
         <p style="font-size:12px;color:#868e96;margin:8px 0 0 0;">{summary}</p>
         {f'<p style="font-size:11px;color:#dc3545;margin:4px 0 0 0;">Ends: {end_str}</p>' if end_str else ''}
         <a href="{listing.maxsold_url}" target="_blank"
@@ -113,10 +156,16 @@ def generate_report(hours_back: int = 24, open_browser: bool = True) -> str:
                 .order_by(PriceResearch.created_at.desc())
                 .first()
             )
+            bid_records = (
+                session.query(BidHistory)
+                .filter_by(listing_id=listing.id)
+                .order_by(BidHistory.recorded_at.asc())
+                .all()
+            )
             if research and research.deal_flag:
-                deals.append((listing, research))
+                deals.append((listing, research, bid_records))
             else:
-                regular.append((listing, research))
+                regular.append((listing, research, bid_records))
 
         today_str = datetime.now().strftime("%B %d, %Y")
         time_str = datetime.now().strftime("%I:%M %p")
@@ -124,7 +173,7 @@ def generate_report(hours_back: int = 24, open_browser: bool = True) -> str:
         # Build deals section
         deals_html = ""
         if deals:
-            cards = "".join(_listing_card_html(l, r) for l, r in deals)
+            cards = "".join(_listing_card_html(l, r, b) for l, r, b in deals)
             deals_html = f"""
             <h2 style="color:#28a745;margin:32px 0 16px 0;font-size:20px;">
               Deals Found ({len(deals)})
@@ -134,7 +183,7 @@ def generate_report(hours_back: int = 24, open_browser: bool = True) -> str:
             </div>"""
 
         # Build all listings section
-        all_cards = "".join(_listing_card_html(l, r) for l, r in deals + regular)
+        all_cards = "".join(_listing_card_html(l, r, b) for l, r, b in deals + regular)
         all_html = ""
         if listings:
             all_html = f"""

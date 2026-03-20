@@ -104,6 +104,14 @@ business:
   currency: CAD
 
 # =============================================================================
+# OPTIONAL: Slack / Discord webhook notifications
+# Paste your webhook URL below to get instant alerts in your channel.
+# =============================================================================
+webhooks:
+  slack_url: ""                # https://hooks.slack.com/services/...
+  discord_url: ""              # https://discord.com/api/webhooks/...
+
+# =============================================================================
 # OPTIONAL: Email notifications (Gmail SMTP)
 # Leave as-is to skip email. HTML reports are always generated locally.
 # =============================================================================

@@ -1,10 +1,10 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from rich.console import Console
 
 from db.database import get_session
-from db.models import Listing, Watchlist
+from db.models import Listing, PriceResearch, Watchlist
 from scraper.maxold import run_scraper
 from pricing.ebay import get_ebay_sold_comps
 from pricing.claude_ai import research_listing, save_research
@@ -40,6 +40,16 @@ def _extract_camera_model(title: str) -> str:
     return " ".join(cleaned[:4]) if cleaned else title[:50]
 
 
+def _try_send_webhook(listing, research, config, ending_soon=False):
+    """Try to send webhook notifications if configured."""
+    try:
+        from notifications.webhooks import send_webhooks
+        return send_webhooks(listing, research, config, ending_soon=ending_soon)
+    except Exception as e:
+        logger.warning(f"Webhook send failed: {e}")
+        return False
+
+
 def _try_send_email(listing, research, config):
     """Try to send email alert if email is configured."""
     email_config = config.get("email", {})
@@ -55,6 +65,64 @@ def _try_send_email(listing, research, config):
     except Exception as e:
         logger.warning(f"Email send failed: {e}")
         return False
+
+
+def _check_ending_soon(config: dict, hours: float = 2.0):
+    """Check for deal listings ending within the next N hours and send urgent alerts."""
+    session = get_session()
+    try:
+        now = datetime.now(timezone.utc)
+        cutoff = now + timedelta(hours=hours)
+
+        listings = (
+            session.query(Listing)
+            .filter(
+                Listing.auction_end_time.isnot(None),
+                Listing.auction_end_time > now,
+                Listing.auction_end_time <= cutoff,
+                Listing.notified.isnot(True),
+            )
+            .all()
+        )
+
+        urgent_count = 0
+        for listing in listings:
+            research = (
+                session.query(PriceResearch)
+                .filter_by(listing_id=listing.id)
+                .order_by(PriceResearch.created_at.desc())
+                .first()
+            )
+            if not research or not research.deal_flag:
+                continue
+
+            time_left = listing.auction_end_time - now
+            hours_left = time_left.total_seconds() / 3600
+            console.print(
+                f"  [bold red]ENDING SOON:[/bold red] {listing.title} — "
+                f"${listing.current_bid:.2f} — {hours_left:.1f}h left"
+            )
+
+            # Send urgent alert
+            research_dict = {
+                "estimated_value": research.estimated_value or 0,
+                "max_bid_price": research.max_bid_price or 0,
+                "condition_score": research.condition_score or "Fair",
+                "condition_notes": research.condition_notes or "",
+                "deal_flag": True,
+                "summary": f"ENDING SOON ({hours_left:.1f}h left) — {research.condition_notes}",
+            }
+            _try_send_email(listing, research_dict, config)
+            _try_send_webhook(listing, research_dict, config, ending_soon=True)
+            urgent_count += 1
+
+        if urgent_count:
+            console.print(f"  [red]{urgent_count} deal(s) ending within {hours:.0f} hours[/red]")
+
+    except Exception as e:
+        logger.warning(f"Ending-soon check failed: {e}")
+    finally:
+        session.close()
 
 
 def run_scrape_pipeline(config: dict, generate_html_report: bool = True):
@@ -88,10 +156,15 @@ def run_scrape_pipeline(config: dict, generate_html_report: bool = True):
 
         console.print(f"  Researching: [bold]{title}[/bold]")
 
-        # Get eBay comps
+        # Pre-score condition for condition-aware eBay search
+        description = listing.description if hasattr(listing, "description") else ""
+        from pricing.claude_ai import _score_condition
+        condition_hint, _ = _score_condition(description)
+
+        # Get eBay comps (condition-filtered when possible)
         camera_model = _extract_camera_model(title)
         try:
-            ebay_comps = get_ebay_sold_comps(camera_model, config)
+            ebay_comps = get_ebay_sold_comps(camera_model, config, condition_hint=condition_hint)
             console.print(
                 f"    eBay: {ebay_comps['sample_count']} comps, "
                 f"avg=${ebay_comps['average_sold']:.2f}"
@@ -132,14 +205,15 @@ def run_scrape_pipeline(config: dict, generate_html_report: bool = True):
                 console.print(f"    [yellow]Failed to save research: {e}[/yellow]")
                 logger.warning(f"Failed to save research: {e}")
 
-        # Step 3: Alerts for watchlist matches or deals
+        # Step 3: Alerts for watchlist matches or deals (with dedup)
         is_watchlist = _is_watchlist_match(title, config)
         is_deal = research.get("deal_flag", False)
+        already_notified = listing.notified if hasattr(listing, "notified") else False
 
         if is_deal:
             deals_found += 1
 
-        if is_watchlist or is_deal:
+        if (is_watchlist or is_deal) and not already_notified:
             reason = []
             if is_watchlist:
                 reason.append("watchlist match")
@@ -147,8 +221,10 @@ def run_scrape_pipeline(config: dict, generate_html_report: bool = True):
                 reason.append("deal flagged")
             console.print(f"    [bold green]Alert: {', '.join(reason)}[/bold green]")
 
-            # Try email if configured
-            if _try_send_email(listing, research, config):
+            # Try email and/or webhooks
+            email_sent = _try_send_email(listing, research, config)
+            webhook_sent = _try_send_webhook(listing, research, config)
+            if email_sent or webhook_sent:
                 alerts_sent += 1
 
                 session = get_session()
@@ -179,7 +255,10 @@ def run_scrape_pipeline(config: dict, generate_html_report: bool = True):
         f"{alerts_sent} emails sent"
     )
 
-    # Step 5: Refresh dashboard
+    # Step 5: Check for deals ending soon
+    _check_ending_soon(config, hours=2.0)
+
+    # Step 6: Refresh dashboard
     try:
         display_dashboard(
             config,

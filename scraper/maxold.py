@@ -238,9 +238,17 @@ def get_item_detail(item_id: int) -> dict:
     return resp.json()
 
 
-def _match_keywords(text: str, keywords_config: dict) -> Optional[str]:
-    """Check if text matches any keyword category. Returns category name or None."""
+def _match_keywords(text: str, keywords_config: dict, exclude_keywords: list = None) -> Optional[str]:
+    """Check if text matches any keyword category. Returns category name or None.
+    Skips listings that match any exclude keyword."""
     text_lower = text.lower()
+
+    # Check exclusions first
+    if exclude_keywords:
+        for keyword in exclude_keywords:
+            if keyword.lower() in text_lower:
+                return None
+
     for category, keyword_list in keywords_config.items():
         for keyword in keyword_list:
             if keyword.lower() in text_lower:
@@ -298,6 +306,7 @@ def scrape_maxsold(config: dict) -> list:
     Returns a list of newly found Listing objects.
     """
     keywords_config = config.get("keywords", {})
+    exclude_keywords = config.get("exclude_keywords", [])
 
     # Step 1: Get Algolia tokens
     logger.info("Extracting Algolia API tokens...")
@@ -350,7 +359,7 @@ def scrape_maxsold(config: dict) -> list:
                     combined_text = f"{title} {description}"
 
                     # Check keyword match
-                    category = _match_keywords(combined_text, keywords_config)
+                    category = _match_keywords(combined_text, keywords_config, exclude_keywords)
                     if not category:
                         continue
 

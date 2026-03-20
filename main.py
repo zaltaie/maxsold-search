@@ -4,16 +4,22 @@ Camera Finder — Vancouver
 Automated Maxsold camera auction scraper with pricing research.
 
 Usage:
-    python main.py              Start the daily scheduler
-    python main.py --scan       Run one scan now and generate a report
-    python main.py --report     Generate a report from existing data
-    python main.py --dashboard  Show the terminal dashboard
+    python main.py                       Start the daily scheduler
+    python main.py --scan                Run one scan now and generate a report
+    python main.py --report              Generate a report from existing data
+    python main.py --export              Export listings to CSV
+    python main.py --dashboard           Show the terminal dashboard
+    python main.py --web                 Start web dashboard (http://localhost:5050)
+    python main.py --watch "Nikon F3"    Add a model to the watchlist
+    python main.py --unwatch "Nikon F3"  Remove a model from the watchlist
+    python main.py --watchlist           Show all watched models
 """
 
 import argparse
 import logging
 import os
 import sys
+from datetime import datetime
 
 import yaml
 from rich.console import Console
@@ -78,6 +84,14 @@ def load_config() -> dict:
     if extra:
         total_added = 0
         for category, kws in extra.items():
+            if category == "exclude":
+                # Exclude keywords stored separately
+                config.setdefault("exclude_keywords", [])
+                for kw in kws:
+                    if kw.lower() not in {e.lower() for e in config["exclude_keywords"]}:
+                        config["exclude_keywords"].append(kw)
+                        total_added += 1
+                continue
             config["keywords"].setdefault(category, [])
             existing_lower = {k.lower() for k in config["keywords"][category]}
             for kw in kws:
@@ -85,8 +99,14 @@ def load_config() -> dict:
                     config["keywords"][category].append(kw)
                     existing_lower.add(kw.lower())
                     total_added += 1
-        if total_added:
-            console.print(f"  [dim]keywords.txt: {total_added} custom keyword{'s' if total_added != 1 else ''} loaded[/dim]")
+        exclude_count = len(config.get("exclude_keywords", []))
+        if total_added or exclude_count:
+            parts = []
+            if total_added:
+                parts.append(f"{total_added} keyword{'s' if total_added != 1 else ''}")
+            if exclude_count:
+                parts.append(f"{exclude_count} exclude filter{'s' if exclude_count != 1 else ''}")
+            console.print(f"  [dim]keywords.txt: {', '.join(parts)} loaded[/dim]")
 
     return config
 
@@ -131,6 +151,124 @@ def cmd_report(config: dict):
 
     report_path = generate_report(hours_back=24, open_browser=True)
     console.print(f"[green]Report: {report_path}[/green]")
+
+
+def cmd_export(config: dict, hours_back: int = 24):
+    """Export listings to CSV."""
+    import csv
+    from datetime import timedelta, timezone
+    from db.models import Listing, PriceResearch
+
+    session = get_session()
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
+        listings = (
+            session.query(Listing)
+            .filter(Listing.created_at >= cutoff)
+            .order_by(Listing.created_at.desc())
+            .all()
+        )
+
+        if not listings:
+            console.print("[yellow]No listings found to export.[/yellow]")
+            return
+
+        export_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
+        os.makedirs(export_dir, exist_ok=True)
+
+        filename = f"export_{datetime.now().strftime('%Y-%m-%d_%H%M')}.csv"
+        filepath = os.path.join(export_dir, filename)
+
+        with open(filepath, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "Title", "Category", "Current Bid", "Est. Value", "Max Bid",
+                "FB Marketplace", "Condition", "Deal?", "Auction Ends",
+                "URL", "Condition Notes",
+            ])
+            for listing in listings:
+                research = (
+                    session.query(PriceResearch)
+                    .filter_by(listing_id=listing.id)
+                    .order_by(PriceResearch.created_at.desc())
+                    .first()
+                )
+                end_str = listing.auction_end_time.strftime("%Y-%m-%d %H:%M") if listing.auction_end_time else ""
+                writer.writerow([
+                    listing.title,
+                    listing.category or "",
+                    f"{listing.current_bid:.2f}",
+                    f"{research.estimated_value:.2f}" if research else "",
+                    f"{research.max_bid_price:.2f}" if research else "",
+                    f"{research.fb_marketplace_ceiling:.2f}" if research else "",
+                    research.condition_score if research else "",
+                    "YES" if research and research.deal_flag else "no",
+                    end_str,
+                    listing.maxsold_url,
+                    research.condition_notes if research else "",
+                ])
+
+        console.print(f"[green]Exported {len(listings)} listings to {filepath}[/green]")
+
+    finally:
+        session.close()
+
+
+def cmd_watch(model: str):
+    """Add a camera model to the watchlist."""
+    session = get_session()
+    try:
+        existing = session.query(Watchlist).filter_by(camera_model=model).first()
+        if existing:
+            console.print(f"[yellow]'{model}' is already on the watchlist.[/yellow]")
+            return
+        session.add(Watchlist(camera_model=model, keywords=[model.lower()]))
+        session.commit()
+        console.print(f"[green]Added '{model}' to watchlist.[/green]")
+    except Exception as e:
+        console.print(f"[red]Failed: {e}[/red]")
+        session.rollback()
+    finally:
+        session.close()
+
+
+def cmd_unwatch(model: str):
+    """Remove a camera model from the watchlist."""
+    session = get_session()
+    try:
+        item = session.query(Watchlist).filter_by(camera_model=model).first()
+        if not item:
+            # Case-insensitive fallback
+            item = session.query(Watchlist).filter(
+                Watchlist.camera_model.ilike(model)
+            ).first()
+        if not item:
+            console.print(f"[yellow]'{model}' not found on the watchlist.[/yellow]")
+            return
+        name = item.camera_model
+        session.delete(item)
+        session.commit()
+        console.print(f"[green]Removed '{name}' from watchlist.[/green]")
+    except Exception as e:
+        console.print(f"[red]Failed: {e}[/red]")
+        session.rollback()
+    finally:
+        session.close()
+
+
+def cmd_watchlist():
+    """Show all watched models."""
+    session = get_session()
+    try:
+        items = session.query(Watchlist).all()
+        if not items:
+            console.print("[dim]Watchlist is empty.[/dim]")
+            return
+        console.print(f"[bold]Watchlist ({len(items)} models):[/bold]")
+        for item in items:
+            console.print(f"  - {item.camera_model}")
+    finally:
+        session.close()
 
 
 def cmd_dashboard(config: dict):
@@ -197,7 +335,12 @@ def main():
     )
     parser.add_argument("--scan", action="store_true", help="Run one scan now and open the report")
     parser.add_argument("--report", action="store_true", help="Generate report from existing data")
+    parser.add_argument("--export", action="store_true", help="Export listings to CSV")
     parser.add_argument("--dashboard", action="store_true", help="Show terminal dashboard")
+    parser.add_argument("--web", action="store_true", help="Start web dashboard (http://localhost:5050)")
+    parser.add_argument("--watch", metavar="MODEL", help="Add a camera model to the watchlist")
+    parser.add_argument("--unwatch", metavar="MODEL", help="Remove a camera model from the watchlist")
+    parser.add_argument("--watchlist", action="store_true", help="Show all watched models")
     args = parser.parse_args()
 
     console.print()
@@ -208,12 +351,23 @@ def main():
     init_db()
     seed_watchlist(config)
 
-    if args.scan:
+    if args.watch:
+        cmd_watch(args.watch)
+    elif args.unwatch:
+        cmd_unwatch(args.unwatch)
+    elif args.watchlist:
+        cmd_watchlist()
+    elif args.scan:
         cmd_scan(config)
     elif args.report:
         cmd_report(config)
+    elif args.export:
+        cmd_export(config)
     elif args.dashboard:
         cmd_dashboard(config)
+    elif args.web:
+        from dashboard.web import run_web_dashboard
+        run_web_dashboard()
     else:
         cmd_scheduler(config)
 

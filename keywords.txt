@@ -104,6 +104,33 @@ dark room
 photo lab
 
 
+# --- Exclude keywords (filter OUT junk matches) --------------------------------
+# Any listing matching these terms will be SKIPPED, even if it matched above.
+[exclude]
+camera bag
+camera strap
+camera case
+tripod
+tripod only
+camera cleaning
+lens cleaning
+lens cap
+lens cover
+screen protector
+memory card
+SD card
+phone camera
+trail camera
+game camera
+security camera
+doorbell camera
+dash cam
+webcam
+GoPro mount
+drone
+action camera mount
+
+
 # --- Your personal watchlist additions (uncomment to activate) ----------------
 # [slr_film]
 # Nikon F3HP

@@ -9,8 +9,34 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-# USD to CAD conversion rate (approximate)
-USD_TO_CAD = 1.35
+# USD to CAD conversion rate — updated live, with fallback
+USD_TO_CAD_FALLBACK = 1.35
+_cached_rate = {"value": None, "fetched_at": 0}
+
+
+def _fetch_usd_to_cad() -> float:
+    """Fetch live USD/CAD rate from Bank of Canada RSS. Caches for 6 hours."""
+    now = time.time()
+    if _cached_rate["value"] and (now - _cached_rate["fetched_at"]) < 21600:
+        return _cached_rate["value"]
+
+    try:
+        # Bank of Canada Valet API — free, no key needed
+        resp = requests.get(
+            "https://www.bankofcanada.ca/valet/observations/FXUSDCAD/json?recent=1",
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        obs = data["observations"][0]
+        rate = float(obs["FXUSDCAD"]["v"])
+        _cached_rate["value"] = rate
+        _cached_rate["fetched_at"] = now
+        logger.info(f"Live USD/CAD rate: {rate:.4f}")
+        return rate
+    except Exception as e:
+        logger.warning(f"Failed to fetch live USD/CAD rate, using fallback {USD_TO_CAD_FALLBACK}: {e}")
+        return _cached_rate["value"] or USD_TO_CAD_FALLBACK
 
 EBAY_SEARCH_URL = "https://www.ebay.com/sch/i.html"
 
@@ -41,11 +67,23 @@ def _parse_price(price_text: str) -> Optional[float]:
     return None
 
 
-def _scrape_ebay_sold(query: str) -> list:
+# eBay condition filter IDs
+EBAY_CONDITION_IDS = {
+    "new": "1000",
+    "open_box": "1500",
+    "refurbished": "2500",
+    "used": "3000",
+    "parts": "7000",
+}
+
+
+def _scrape_ebay_sold(query: str, condition: str = None) -> list:
     """
     Scrape eBay completed/sold listings for a search query.
     Returns a list of dicts with title, price_usd, and url.
     No API key needed — uses public search pages.
+
+    condition: optional filter — "used", "parts", "new", etc.
     """
     params = {
         "_nkw": query,
@@ -54,6 +92,8 @@ def _scrape_ebay_sold(query: str) -> list:
         "_sop": "13",        # Sort by end date: recent first
         "_ipg": "60",        # Results per page
     }
+    if condition and condition.lower() in EBAY_CONDITION_IDS:
+        params["LH_ItemCondition"] = EBAY_CONDITION_IDS[condition.lower()]
 
     try:
         resp = requests.get(EBAY_SEARCH_URL, params=params, headers=_get_headers(), timeout=20)
@@ -135,10 +175,13 @@ def _generate_fallback_queries(camera_model: str) -> list:
     return queries
 
 
-def get_ebay_sold_comps(camera_model: str, config: dict = None) -> dict:
+def get_ebay_sold_comps(camera_model: str, config: dict = None, condition_hint: str = None) -> dict:
     """
     Get sold comparable listings from eBay by scraping public search pages.
     No API key or login required.
+
+    If condition_hint is provided (e.g. "used", "parts"), tries a condition-
+    filtered search first, then falls back to unfiltered if no results.
 
     Returns a dict with average, min, max sold prices (in CAD),
     sample count, and raw listing data.
@@ -155,14 +198,35 @@ def get_ebay_sold_comps(camera_model: str, config: dict = None) -> dict:
     queries = _generate_fallback_queries(camera_model)
     items = []
 
+    # Map condition hints to eBay filter
+    ebay_condition = None
+    if condition_hint:
+        hint_lower = condition_hint.lower()
+        if hint_lower in ("parts only", "parts"):
+            ebay_condition = "parts"
+        elif hint_lower in ("excellent", "like new"):
+            ebay_condition = "used"  # eBay "used" is the closest to "excellent used"
+        else:
+            ebay_condition = "used"
+
     for query in queries:
         # Polite delay between requests
         time.sleep(random.uniform(1.5, 3.0))
 
-        items = _scrape_ebay_sold(query)
-        if items:
-            logger.info(f"eBay: Found {len(items)} sold comps for '{query}'")
-            break
+        # Try condition-filtered search first
+        if ebay_condition:
+            items = _scrape_ebay_sold(query, condition=ebay_condition)
+            if items:
+                logger.info(f"eBay: Found {len(items)} {ebay_condition} comps for '{query}'")
+                break
+
+        # Fall back to unfiltered
+        if not items:
+            items = _scrape_ebay_sold(query)
+            if items:
+                logger.info(f"eBay: Found {len(items)} sold comps for '{query}'")
+                break
+
         logger.info(f"eBay: No results for '{query}', trying broader search...")
 
     if not items:
@@ -170,11 +234,12 @@ def get_ebay_sold_comps(camera_model: str, config: dict = None) -> dict:
         return result
 
     # Convert to CAD and build result
+    usd_to_cad = _fetch_usd_to_cad()
     prices_cad = []
     raw_listings = []
 
     for item in items:
-        price_cad = item["price_usd"] * USD_TO_CAD
+        price_cad = item["price_usd"] * usd_to_cad
         prices_cad.append(price_cad)
         raw_listings.append({
             "title": item["title"],
