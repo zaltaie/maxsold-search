@@ -86,9 +86,17 @@ def send_instant_alert(listing, research: dict, config: dict) -> bool:
         else:
             end_time_str = str(end_time)
 
+    # Profit metrics
+    potential_profit = research.get("potential_profit", 0)
+    roi_percent = research.get("roi_percent", 0)
+    if not potential_profit and estimated_value > 0 and current_bid > 0:
+        potential_profit = estimated_value - current_bid
+        roi_percent = (potential_profit / current_bid * 100) if current_bid > 0 else 0
+
     deal_badge = ""
     if deal_flag:
-        deal_badge = '<span style="background:#28a745;color:#fff;padding:4px 12px;border-radius:12px;font-weight:bold;font-size:14px;">DEAL</span>'
+        profit_text = f" — ${potential_profit:.0f} profit ({roi_percent:.0f}% ROI)" if potential_profit > 0 else ""
+        deal_badge = f'<span style="background:#28a745;color:#fff;padding:4px 12px;border-radius:12px;font-weight:bold;font-size:14px;">DEAL{profit_text}</span>'
 
     subject = f"[CAMERA ALERT] {title} — Bid ${current_bid:.2f} / Est. ${estimated_value:.2f}"
 

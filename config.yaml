@@ -9,8 +9,14 @@
 
 # Maxsold settings
 maxsold:
+  region: "vancouver"          # Region: vancouver, toronto, calgary, montreal, ottawa, edmonton, victoria, winnipeg
   region_url: "https://maxsold.com/canada/british-columbia/vancouver"
-  scan_time: "08:00"         # Daily auto-scan time (24h format). Set to "" to disable.
+  scan_time: "08:00"           # Daily auto-scan time (24h format). Set to "" to disable.
+  scan_interval_hours: 0       # Set > 0 for interval scanning (e.g., 4 = every 4 hours). Overrides scan_time.
+
+# General settings
+settings:
+  log_level: "INFO"            # DEBUG, INFO, WARNING, ERROR
 
 # Camera keywords to match (title + description search)
 keywords:

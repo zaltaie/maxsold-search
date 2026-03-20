@@ -1,7 +1,9 @@
 import logging
+import math
 import re
 import time
 import random
+import threading
 from typing import Optional
 from urllib.parse import quote_plus
 
@@ -11,17 +13,17 @@ logger = logging.getLogger(__name__)
 
 # USD to CAD conversion rate — updated live, with fallback
 USD_TO_CAD_FALLBACK = 1.35
-_cached_rate = {"value": None, "fetched_at": 0}
+_cached_rate = {"value": None, "fetched_at": 0, "lock": threading.Lock()}
 
 
 def _fetch_usd_to_cad() -> float:
-    """Fetch live USD/CAD rate from Bank of Canada RSS. Caches for 6 hours."""
+    """Fetch live USD/CAD rate from Bank of Canada. Thread-safe, cached for 6 hours."""
     now = time.time()
-    if _cached_rate["value"] and (now - _cached_rate["fetched_at"]) < 21600:
-        return _cached_rate["value"]
+    with _cached_rate["lock"]:
+        if _cached_rate["value"] and (now - _cached_rate["fetched_at"]) < 21600:
+            return _cached_rate["value"]
 
     try:
-        # Bank of Canada Valet API — free, no key needed
         resp = requests.get(
             "https://www.bankofcanada.ca/valet/observations/FXUSDCAD/json?recent=1",
             timeout=10,
@@ -30,13 +32,37 @@ def _fetch_usd_to_cad() -> float:
         data = resp.json()
         obs = data["observations"][0]
         rate = float(obs["FXUSDCAD"]["v"])
-        _cached_rate["value"] = rate
-        _cached_rate["fetched_at"] = now
+        with _cached_rate["lock"]:
+            _cached_rate["value"] = rate
+            _cached_rate["fetched_at"] = now
         logger.info(f"Live USD/CAD rate: {rate:.4f}")
         return rate
     except Exception as e:
         logger.warning(f"Failed to fetch live USD/CAD rate, using fallback {USD_TO_CAD_FALLBACK}: {e}")
-        return _cached_rate["value"] or USD_TO_CAD_FALLBACK
+        with _cached_rate["lock"]:
+            return _cached_rate["value"] or USD_TO_CAD_FALLBACK
+
+
+def _request_with_retry(url, params=None, max_retries=3, **kwargs) -> requests.Response:
+    """Make an HTTP GET request with exponential backoff retry on failure."""
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.get(url, params=params, headers=_get_headers(), timeout=20, **kwargs)
+            if resp.status_code == 429:
+                wait = (2 ** attempt) + random.uniform(0.5, 2.0)
+                logger.warning(f"Rate limited (429), waiting {wait:.1f}s before retry {attempt + 1}")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries:
+                wait = (2 ** attempt) + random.uniform(0.5, 1.5)
+                logger.warning(f"Request failed (attempt {attempt + 1}/{max_retries + 1}): {e}, retrying in {wait:.1f}s")
+                time.sleep(wait)
+            else:
+                raise
+    raise requests.exceptions.RequestException(f"All {max_retries + 1} attempts failed for {url}")
 
 EBAY_SEARCH_URL = "https://www.ebay.com/sch/i.html"
 
@@ -96,8 +122,7 @@ def _scrape_ebay_sold(query: str, condition: str = None) -> list:
         params["LH_ItemCondition"] = EBAY_CONDITION_IDS[condition.lower()]
 
     try:
-        resp = requests.get(EBAY_SEARCH_URL, params=params, headers=_get_headers(), timeout=20)
-        resp.raise_for_status()
+        resp = _request_with_retry(EBAY_SEARCH_URL, params=params)
     except Exception as e:
         logger.warning(f"eBay scrape failed for '{query}': {e}")
         return []
@@ -248,7 +273,14 @@ def get_ebay_sold_comps(camera_model: str, config: dict = None, condition_hint: 
             "url": item.get("url", ""),
         })
 
+    # Remove statistical outliers (IQR method) for more accurate pricing
+    prices_cad = _remove_outliers(prices_cad)
+    if not prices_cad:
+        # All prices were outliers — fall back to raw
+        prices_cad = [item["price_usd"] * usd_to_cad for item in items]
+
     result["average_sold"] = round(sum(prices_cad) / len(prices_cad), 2)
+    result["median_sold"] = round(_median(prices_cad), 2)
     result["min_sold"] = round(min(prices_cad), 2)
     result["max_sold"] = round(max(prices_cad), 2)
     result["sample_count"] = len(prices_cad)
@@ -256,9 +288,47 @@ def get_ebay_sold_comps(camera_model: str, config: dict = None, condition_hint: 
 
     logger.info(
         f"eBay comps for '{camera_model}': "
-        f"avg=${result['average_sold']:.2f} CAD, "
+        f"avg=${result['average_sold']:.2f}, median=${result['median_sold']:.2f} CAD, "
         f"range=${result['min_sold']:.2f}-${result['max_sold']:.2f}, "
         f"n={result['sample_count']}"
     )
 
     return result
+
+
+def _median(values: list) -> float:
+    """Calculate median of a list of numbers."""
+    sorted_vals = sorted(values)
+    n = len(sorted_vals)
+    if n == 0:
+        return 0.0
+    mid = n // 2
+    if n % 2 == 0:
+        return (sorted_vals[mid - 1] + sorted_vals[mid]) / 2
+    return sorted_vals[mid]
+
+
+def _remove_outliers(prices: list) -> list:
+    """Remove price outliers using IQR (Interquartile Range) method.
+    Keeps prices within 1.5 * IQR of Q1/Q3. Requires at least 4 data points."""
+    if len(prices) < 4:
+        return prices
+
+    sorted_prices = sorted(prices)
+    n = len(sorted_prices)
+    q1 = sorted_prices[n // 4]
+    q3 = sorted_prices[3 * n // 4]
+    iqr = q3 - q1
+
+    if iqr == 0:
+        return prices
+
+    lower_bound = q1 - 1.5 * iqr
+    upper_bound = q3 + 1.5 * iqr
+
+    filtered = [p for p in prices if lower_bound <= p <= upper_bound]
+    if filtered:
+        removed = len(prices) - len(filtered)
+        if removed > 0:
+            logger.info(f"Removed {removed} price outlier(s) outside ${lower_bound:.2f}-${upper_bound:.2f}")
+    return filtered if filtered else prices

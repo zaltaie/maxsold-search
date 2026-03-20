@@ -15,23 +15,35 @@ from db.models import PriceResearch
 logger = logging.getLogger(__name__)
 
 # Keywords that indicate condition level (checked against description, case-insensitive)
+# Ordered from most specific to least specific within each category
 CONDITION_KEYWORDS = {
     "Excellent": [
-        "mint", "like new", "excellent", "pristine", "perfect",
-        "barely used", "immaculate", "flawless",
+        "mint condition", "mint", "like new", "excellent condition", "excellent",
+        "pristine", "perfect condition", "perfect", "barely used", "immaculate",
+        "flawless", "near mint", "new in box", "never used", "unused",
     ],
     "Good": [
-        "good condition", "works well", "working", "functions",
-        "tested", "clean", "nice", "well maintained", "light wear",
+        "good condition", "works well", "fully working", "working condition",
+        "working", "fully functional", "functions properly", "functions",
+        "tested working", "tested and working", "tested", "clean",
+        "well maintained", "light wear", "minor wear", "nice condition", "nice",
+        "good shape", "great condition", "very good",
     ],
     "Fair": [
-        "fair", "some wear", "scratches", "scuffs", "signs of use",
-        "cosmetic", "used", "wear", "aged", "patina",
+        "fair condition", "fair", "some wear", "scratches", "scuffs",
+        "signs of use", "cosmetic damage", "cosmetic wear", "cosmetic",
+        "heavy wear", "moderate wear", "well used", "used condition",
+        "aged", "patina", "brassing", "paint wear", "faded",
     ],
     "Parts Only": [
-        "parts only", "parts or repair", "not working", "broken",
-        "as-is", "as is", "for parts", "untested", "repair",
-        "damaged", "crack", "fungus", "haze", "stuck", "jammed",
+        "parts only", "parts or repair", "for parts or repair",
+        "not working", "not functioning", "does not work", "broken",
+        "as-is", "as is", "for parts", "untested", "needs repair", "repair",
+        "damaged", "cracked", "crack", "shutter stuck", "stuck shutter",
+        "fungus", "heavy fungus", "lens fungus", "haze", "lens haze",
+        "separation", "balsam separation", "stuck", "jammed", "seized",
+        "corroded", "corrosion", "battery leak", "mold", "mould",
+        "missing parts", "incomplete", "water damage", "fog", "foggy lens",
     ],
 }
 
@@ -42,21 +54,42 @@ FB_MARKETPLACE_FACTOR = 0.85
 def _score_condition(description: str) -> tuple[str, str]:
     """
     Analyze listing description text to estimate condition.
+    Uses a scoring system — all categories are checked and the one with
+    the strongest signal wins. This prevents generic words like "used"
+    from overriding more specific matches like "barely used" or "fungus".
+
     Returns (condition_score, condition_notes).
     """
     desc_lower = description.lower()
 
-    # Check from best to worst — more specific phrases like "barely used" match before generic "used"
-    for condition in ["Excellent", "Good", "Parts Only", "Fair"]:
-        matched_keywords = []
+    # Score each condition level by counting keyword matches with weights
+    # Longer/more specific phrases get higher weight
+    scores = {}
+    all_matches = {}
+
+    for condition in CONDITION_KEYWORDS:
+        score = 0
+        matches = []
         for kw in CONDITION_KEYWORDS[condition]:
-            # Use word boundary matching to avoid "untested" matching "tested"
             pattern = r'(?<!\w)' + re.escape(kw) + r'(?!\w)'
             if re.search(pattern, desc_lower):
-                matched_keywords.append(kw)
-        if matched_keywords:
-            notes = f"Matched: {', '.join(matched_keywords[:3])}"
-            return condition, notes
+                # Weight by phrase length — multi-word phrases are more specific
+                weight = len(kw.split())
+                score += weight
+                matches.append(kw)
+        scores[condition] = score
+        all_matches[condition] = matches
+
+    # "Parts Only" keywords are strong negative signals — boost their weight
+    # because a camera with fungus/haze is definitively parts-only
+    if scores.get("Parts Only", 0) > 0:
+        scores["Parts Only"] *= 2
+
+    # Pick the condition with the highest score
+    best = max(scores, key=scores.get)
+    if scores[best] > 0:
+        notes = f"Matched: {', '.join(all_matches[best][:3])}"
+        return best, notes
 
     # No matches — default to Fair (conservative)
     return "Fair", "No condition indicators found in description"
@@ -86,8 +119,8 @@ def research_listing(listing: dict, ebay_comps: dict, config: dict = None) -> di
     title = listing.get("title", "Unknown camera")
     description = listing.get("description", "")
 
-    # Estimate value from eBay comps
-    avg_sold = ebay_comps.get("average_sold", 0)
+    # Estimate value from eBay comps — prefer median over average for robustness
+    avg_sold = ebay_comps.get("median_sold", 0) or ebay_comps.get("average_sold", 0)
     min_sold = ebay_comps.get("min_sold", 0)
     max_sold = ebay_comps.get("max_sold", 0)
     sample_count = ebay_comps.get("sample_count", 0)
@@ -113,12 +146,18 @@ def research_listing(listing: dict, ebay_comps: dict, config: dict = None) -> di
     fb_marketplace_ceiling = round(estimated_value * FB_MARKETPLACE_FACTOR, 2)
     deal_flag = current_bid < max_bid_price if max_bid_price > 0 else False
 
+    # Calculate profit metrics
+    potential_profit = round(estimated_value - current_bid, 2) if estimated_value > 0 else 0
+    roi_percent = round((potential_profit / current_bid) * 100, 1) if current_bid > 0 and estimated_value > 0 else 0
+    profit_after_fees = round(potential_profit * 0.87, 2)  # ~13% for platform fees + shipping
+
     # Build summary
     if estimated_value > 0 and deal_flag:
         savings = max_bid_price - current_bid
         summary = (
             f"{title} — estimated resale ${estimated_value:.0f} CAD, "
-            f"current bid ${current_bid:.0f} is ${savings:.0f} under your max bid target."
+            f"current bid ${current_bid:.0f} is ${savings:.0f} under your max bid target. "
+            f"Potential profit: ${potential_profit:.0f} ({roi_percent:.0f}% ROI)."
         )
     elif estimated_value > 0:
         summary = (
@@ -139,6 +178,9 @@ def research_listing(listing: dict, ebay_comps: dict, config: dict = None) -> di
         "condition_score": condition_score,
         "condition_notes": condition_notes,
         "deal_flag": deal_flag,
+        "potential_profit": potential_profit,
+        "roi_percent": roi_percent,
+        "profit_after_fees": profit_after_fees,
         "summary": summary,
     }
 

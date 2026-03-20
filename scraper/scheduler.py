@@ -14,10 +14,13 @@ from dashboard.terminal import display_dashboard
 logger = logging.getLogger(__name__)
 console = Console()
 
-# Track state for dashboard display
+# Track state for dashboard display and health monitoring
 _state = {
     "last_scrape_time": None,
     "last_report_path": None,
+    "consecutive_failures": 0,
+    "total_scrapes": 0,
+    "total_deals": 0,
 }
 
 
@@ -136,13 +139,23 @@ def run_scrape_pipeline(config: dict, generate_html_report: bool = True):
     """
     console.rule("[bold cyan]Scrape Cycle Starting[/bold cyan]")
 
+    _state["total_scrapes"] += 1
+
     # Step 1: Scrape
     try:
         new_listings = run_scraper(config)
+        _state["consecutive_failures"] = 0
     except Exception as e:
+        _state["consecutive_failures"] += 1
         console.print(f"[red]Scraper error: {e}[/red]")
         logger.error(f"Scraper error: {e}", exc_info=True)
         new_listings = []
+
+        if _state["consecutive_failures"] >= 3:
+            console.print(
+                f"[bold red]WARNING: {_state['consecutive_failures']} consecutive scrape failures. "
+                f"Check network or Maxsold availability.[/bold red]"
+            )
 
     console.print(f"[green]Found {len(new_listings)} new listings[/green]")
 
@@ -224,9 +237,19 @@ def run_scrape_pipeline(config: dict, generate_html_report: bool = True):
             # Try email and/or webhooks
             email_sent = _try_send_email(listing, research, config)
             webhook_sent = _try_send_webhook(listing, research, config)
-            if email_sent or webhook_sent:
-                alerts_sent += 1
 
+            # Only mark as notified if at least one notification actually succeeded,
+            # OR if no notification channels are configured (to avoid retrying forever)
+            has_email_config = bool(config.get("email", {}).get("sender_address", ""))
+            has_webhook_config = bool(
+                config.get("webhooks", {}).get("slack_url", "")
+                or config.get("webhooks", {}).get("discord_url", "")
+            )
+            no_channels = not has_email_config and not has_webhook_config
+            notification_succeeded = email_sent or webhook_sent or no_channels
+
+            if notification_succeeded:
+                alerts_sent += 1
                 session = get_session()
                 try:
                     db_listing = session.query(Listing).get(listing_id)
@@ -235,6 +258,8 @@ def run_scrape_pipeline(config: dict, generate_html_report: bool = True):
                         session.commit()
                 finally:
                     session.close()
+            else:
+                console.print(f"    [yellow]Notification failed — will retry next cycle[/yellow]")
 
     # Step 4: Generate HTML report
     _state["last_scrape_time"] = datetime.now(timezone.utc)
@@ -248,11 +273,16 @@ def run_scrape_pipeline(config: dict, generate_html_report: bool = True):
             console.print(f"  [yellow]Report generation failed: {e}[/yellow]")
 
     # Summary
+    _state["total_deals"] += deals_found
     console.rule("[bold cyan]Scrape Cycle Complete[/bold cyan]")
     console.print(
         f"  Results: {len(new_listings)} new, "
         f"{deals_found} deals, "
-        f"{alerts_sent} emails sent"
+        f"{alerts_sent} alerts sent"
+    )
+    console.print(
+        f"  [dim]Session totals: {_state['total_scrapes']} scrapes, "
+        f"{_state['total_deals']} deals found[/dim]"
     )
 
     # Step 5: Check for deals ending soon

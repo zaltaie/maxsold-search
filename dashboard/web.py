@@ -89,6 +89,14 @@ def _build_listing_rows_html(session, hours_back=24):
 
         deal_badge = '<span style="background:#28a745;color:#fff;padding:2px 8px;border-radius:8px;font-size:11px;font-weight:bold;">DEAL</span>' if deal else ''
 
+        # Profit/ROI
+        profit_html = ""
+        if research and research.estimated_value and research.estimated_value > 0:
+            profit = research.estimated_value - (listing.current_bid or 0)
+            roi = (profit / listing.current_bid * 100) if listing.current_bid > 0 else 0
+            p_color = "#28a745" if profit > 0 else "#dc3545"
+            profit_html = f'<div style="font-size:11px;color:{p_color};">${profit:.0f} ({roi:.0f}%)</div>'
+
         rows += f"""<tr style="border-bottom:1px solid #e9ecef;">
             <td style="padding:10px 8px;">{photo_html}</td>
             <td style="padding:10px 8px;">
@@ -101,7 +109,7 @@ def _build_listing_rows_html(session, hours_back=24):
             <td style="padding:10px 8px;text-align:center;">
                 <span style="background:{condition_color};color:#fff;padding:2px 8px;border-radius:8px;font-size:11px;">{condition}</span>
             </td>
-            <td style="padding:10px 8px;text-align:center;">{deal_badge}</td>
+            <td style="padding:10px 8px;text-align:center;">{deal_badge}{profit_html}</td>
             <td style="padding:10px 8px;text-align:center;font-size:12px;">{end_str}</td>
         </tr>"""
 

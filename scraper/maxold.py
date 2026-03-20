@@ -4,6 +4,8 @@ import logging
 import random
 import re
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -15,8 +17,18 @@ from db.models import Listing, BidHistory
 
 logger = logging.getLogger(__name__)
 
-# Vancouver coordinates for Algolia geosearch
-VANCOUVER_LAT_LNG = "49.2827,-123.1207"
+# Region coordinates for Algolia geosearch
+REGION_COORDS = {
+    "vancouver": "49.2827,-123.1207",
+    "toronto": "43.6532,-79.3832",
+    "calgary": "51.0447,-114.0719",
+    "montreal": "45.5017,-73.5673",
+    "ottawa": "45.4215,-75.6972",
+    "edmonton": "53.5461,-113.4938",
+    "victoria": "48.4284,-123.3656",
+    "winnipeg": "49.8951,-97.1384",
+}
+DEFAULT_REGION = "vancouver"
 SEARCH_RADIUS_METERS = 100000  # 100 km
 
 # Algolia endpoint template
@@ -26,6 +38,10 @@ ALGOLIA_AGENT = "Algolia%20for%20JavaScript%20(4.11.0)%3B%20Browser"
 # Maxsold internal API endpoints
 MAXSOLD_API_ITEMS = "https://maxsold.maxsold.com/api/getitems"
 MAXSOLD_API_ITEM_DATA = "https://maxsold.maxsold.com/api/itemdata"
+
+# Token cache — avoids re-extracting Algolia credentials every scrape
+_token_cache = {"tokens": None, "fetched_at": 0, "lock": threading.Lock()}
+TOKEN_CACHE_TTL = 3600  # 1 hour
 
 
 def _extract_algolia_tokens(js_text: str) -> dict:
@@ -137,24 +153,67 @@ def _get_algolia_tokens_direct() -> dict:
         return {}
 
 
+def _run_playwright_in_thread() -> dict:
+    """Run Playwright token extraction in a dedicated thread with its own event loop.
+    This avoids asyncio.run() deadlocks when called from within an existing event loop."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(_get_algolia_tokens_via_playwright())
+    finally:
+        loop.close()
+
+
 def get_algolia_tokens() -> dict:
-    """Get Algolia tokens, trying direct method first then Playwright fallback."""
+    """Get Algolia tokens with caching. Tries direct HTTP first, then Playwright fallback.
+    Cached for 1 hour to avoid redundant extraction."""
+    now = time.time()
+    with _token_cache["lock"]:
+        cached = _token_cache["tokens"]
+        if cached and (now - _token_cache["fetched_at"]) < TOKEN_CACHE_TTL:
+            if cached.get("algoliaSearchAPIKey") and cached.get("algoliaApplicationId"):
+                logger.debug("Using cached Algolia tokens")
+                return cached
+
+    # Try direct HTTP first (fast, no browser needed)
     tokens = _get_algolia_tokens_direct()
     if tokens.get("algoliaSearchAPIKey") and tokens.get("algoliaApplicationId"):
         logger.info("Algolia tokens extracted via direct HTTP")
+        with _token_cache["lock"]:
+            _token_cache["tokens"] = tokens
+            _token_cache["fetched_at"] = now
         return tokens
 
+    # Playwright fallback — run in a separate thread to avoid event loop conflicts
     logger.info("Falling back to Playwright for token extraction")
-    tokens = asyncio.run(_get_algolia_tokens_via_playwright())
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_run_playwright_in_thread)
+            tokens = future.result(timeout=60)
+    except Exception as e:
+        logger.error(f"Playwright token extraction failed: {e}")
+        tokens = {}
+
     if tokens.get("algoliaSearchAPIKey"):
         logger.info("Algolia tokens extracted via Playwright")
+        with _token_cache["lock"]:
+            _token_cache["tokens"] = tokens
+            _token_cache["fetched_at"] = now
     else:
-        logger.error("Failed to extract Algolia tokens")
+        logger.error("Failed to extract Algolia tokens via all methods")
     return tokens
 
 
-def search_auctions(tokens: dict, page: int = 0) -> dict:
-    """Search for active auctions near Vancouver using the Algolia API."""
+def _get_region_coords(config: dict) -> str:
+    """Get lat/lng string for the configured region."""
+    region = config.get("maxsold", {}).get("region", DEFAULT_REGION).lower()
+    return REGION_COORDS.get(region, REGION_COORDS[DEFAULT_REGION])
+
+
+def search_auctions(tokens: dict, page: int = 0, region_coords: str = None) -> dict:
+    """Search for active auctions near the configured region using the Algolia API."""
+    if region_coords is None:
+        region_coords = REGION_COORDS[DEFAULT_REGION]
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "x-algolia-api-key": tokens["algoliaSearchAPIKey"],
@@ -163,7 +222,6 @@ def search_auctions(tokens: dict, page: int = 0) -> dict:
     }
 
     now = int(time.time())
-    # end_date > (now - 900) means auction hasn't ended yet (with 15-min buffer)
     end_threshold = now - 900
 
     data = json.dumps({
@@ -172,7 +230,7 @@ def search_auctions(tokens: dict, page: int = 0) -> dict:
         "facetFilters": ["auction_phase:-cancelledAuction"],
         "hitsPerPage": 100,
         "page": page,
-        "aroundLatLng": VANCOUVER_LAT_LNG,
+        "aroundLatLng": region_coords,
         "aroundLatLngViaIP": False,
         "aroundRadius": SEARCH_RADIUS_METERS,
     })
@@ -183,8 +241,11 @@ def search_auctions(tokens: dict, page: int = 0) -> dict:
     return resp.json()
 
 
-def search_items(tokens: dict, query: str = "", page: int = 0) -> dict:
+def search_items(tokens: dict, query: str = "", page: int = 0, region_coords: str = None) -> dict:
     """Search for individual items across auctions using the Algolia API."""
+    if region_coords is None:
+        region_coords = REGION_COORDS[DEFAULT_REGION]
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "x-algolia-api-key": tokens["algoliaSearchAPIKey"],
@@ -201,7 +262,7 @@ def search_items(tokens: dict, query: str = "", page: int = 0) -> dict:
         "facetFilters": ["auction_phase:-cancelledAuction"],
         "hitsPerPage": 100,
         "page": page,
-        "aroundLatLng": VANCOUVER_LAT_LNG,
+        "aroundLatLng": region_coords,
         "aroundLatLngViaIP": False,
         "aroundRadius": SEARCH_RADIUS_METERS,
     })
@@ -317,15 +378,17 @@ def scrape_maxsold(config: dict) -> list:
 
     new_listings = []
     session = get_session()
+    region_coords = _get_region_coords(config)
+    region_name = config.get("maxsold", {}).get("region", DEFAULT_REGION).title()
 
     try:
-        # Step 2: Search for auctions near Vancouver
-        logger.info("Searching for active auctions near Vancouver...")
+        # Step 2: Search for auctions near the configured region
+        logger.info(f"Searching for active auctions near {region_name}...")
         all_auction_ids = []
 
         page = 0
         while True:
-            results = search_auctions(tokens, page=page)
+            results = search_auctions(tokens, page=page, region_coords=region_coords)
             hits = results.get("hits", [])
             if not hits:
                 break
@@ -333,12 +396,11 @@ def scrape_maxsold(config: dict) -> list:
                 auction_id = hit.get("am_auction_id") or hit.get("objectID")
                 if auction_id:
                     all_auction_ids.append(auction_id)
-            # Check if there are more pages
             if page >= results.get("nbPages", 1) - 1:
                 break
             page += 1
 
-        logger.info(f"Found {len(all_auction_ids)} active auctions near Vancouver")
+        logger.info(f"Found {len(all_auction_ids)} active auctions near {region_name}")
 
         # Step 3: For each auction, get items and check for camera keywords
         for auction_id in all_auction_ids:

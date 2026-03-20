@@ -77,6 +77,17 @@ def _listing_card_html(listing, research, bid_records=None) -> str:
     summary = research.condition_notes if research else ""
     deal_flag = research.deal_flag if research else False
 
+    # Profit calculations
+    profit_html = ""
+    if research and research.estimated_value and research.estimated_value > 0:
+        current_bid = listing.current_bid or 0
+        potential_profit = research.estimated_value - current_bid
+        roi = (potential_profit / current_bid * 100) if current_bid > 0 else 0
+        profit_color = "#28a745" if potential_profit > 0 else "#dc3545"
+        profit_html = f"""
+          <tr><td>Potential Profit</td><td style="text-align:right;font-weight:bold;color:{profit_color};">${potential_profit:.2f}</td></tr>
+          <tr><td>ROI</td><td style="text-align:right;color:{profit_color};">{roi:.0f}%</td></tr>"""
+
     # Photo
     photo_html = '<div style="width:100%;height:180px;background:#e9ecef;display:flex;align-items:center;justify-content:center;color:#868e96;font-size:14px;">No photo</div>'
     if listing.photo_urls and isinstance(listing.photo_urls, list) and listing.photo_urls:
@@ -110,6 +121,7 @@ def _listing_card_html(listing, research, bid_records=None) -> str:
           <tr><td>Est. Resale</td><td style="text-align:right;font-weight:bold;color:#28a745;">{est_value}</td></tr>
           <tr><td>Max Bid Target</td><td style="text-align:right;">{max_bid}</td></tr>
           <tr><td>FB Marketplace</td><td style="text-align:right;">{fb_price}</td></tr>
+          {profit_html}
         </table>
         {bid_chart}
         <p style="font-size:12px;color:#868e96;margin:8px 0 0 0;">{summary}</p>
