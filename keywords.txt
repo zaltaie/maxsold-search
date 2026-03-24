@@ -50,10 +50,24 @@ Olympus OM-2
 Olympus OM-3
 Olympus OM-4
 Voigtlander
+Canon AE-1
+Canon A-1
+Canon F-1
+Nikon FM
+Nikon FE
+Nikon F3
+Nikon F4
+Nikon F5
 Zorki
 Kiev
 FED
 Zenit
+Nikon
+Canon
+Pentax
+Minolta
+Olympus
+Voigtlander
 Praktica
 Exakta
 Topcon
@@ -102,6 +116,11 @@ Sekonic
 Weston meter
 dark room
 photo lab
+Camera
+Film
+8mm
+16mm
+35mm
 
 
 # --- Your personal watchlist additions (uncomment to activate) ----------------
